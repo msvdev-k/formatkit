@@ -56,7 +56,7 @@ class UnsupportedFormatVersionError(FormatManagerError):
     """Версия файла новее, чем поддерживает текущая версия приложения (нужно обновить программу)"""
 
 
-class FormatCorruptedError(FileManagerError):
+class FormatCorruptedError(FormatManagerError):
     """Ошибка при проверке схемы (версия файла не соответствует схеме БД)"""
 
 

@@ -7,21 +7,8 @@ from sqlite3 import Connection
 from types import TracebackType
 from typing import Callable, Protocol, runtime_checkable
 
-from .exceptions import FileManagerError, FileAlreadyOpenError, FileNotOpenError
-
-
-class LockHeldByOtherError(FileManagerError):
-    """Файл заблокирован другим процессом"""
-
-
-class WriteNotAllowedError(FileManagerError):
-    """Запись данных в файл невозможна"""
-    pass
-
-
-class FileCorruptedError(FileManagerError):
-    """Файл, повреждён или имеет не верный формат"""
-    pass
+from .exceptions import FileManagerError, FileAlreadyOpenError, FileNotOpenError, FileCorruptedError, FileMissingError, \
+    FileLockedError, ReadOnlyFileError, FileAlreadyExistsError
 
 
 class OpenMode(Enum):
@@ -42,7 +29,7 @@ def make_backup_file(project_path: Path | str,
     """
     source_path = Path(project_path).resolve()
     if not source_path.is_file():
-        raise FileNotFoundError(f"Невозможно сделать копию: файл не найден {source_path}")
+        raise FileMissingError(f"Невозможно сделать копию: файл не найден {source_path}")
 
     # Если директория не задана, сохраняем рядом с проектом
     if backup_dir is None:
@@ -119,6 +106,9 @@ class FileConnectionContext(AbstractContextManager[Connection]):
 
             return self._conn
 
+        except sqlite3.OperationalError:
+            raise FileLockedError("Файл заблокирован")
+
         except Exception:
             # ВАЖНО: если ошибка произошла внутри __enter__, метод __exit__ вызван НЕ будет!
             # Поэтому закрываем соединение в ручную перед пробросом исключения.
@@ -190,6 +180,7 @@ class FileConnectionManager(Protocol):
 class FileManager:
 
     def __init__(self):
+        self._project_path: Path | None = None
         self._project_uri: str | None = None
         self._read_only_project_uri: str | None = None
         self._open_mode: OpenMode = OpenMode.READ_ONLY
@@ -197,7 +188,7 @@ class FileManager:
     @property
     def is_open(self) -> bool:
         """True - файл открыт"""
-        return self._project_uri is not None
+        return self._project_path is not None
 
     @property
     def mode(self) -> OpenMode:
@@ -219,7 +210,7 @@ class FileManager:
 
         # 2. Если файл уже существует, это ошибка перезаписи (защита данных пользователя)
         if project_path.exists():
-            raise WriteNotAllowedError(f"Файл уже существует: {project_path}")
+            raise FileAlreadyExistsError(f"Файл уже существует: {project_path}")
 
         # 3. Гарантируем, что директория существует (актуально для Windows/Linux)
         project_path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,7 +221,7 @@ class FileManager:
             with project_path.open(mode="x") as _:
                 pass  # Просто создаём пустой файл
         except FileExistsError:
-            raise WriteNotAllowedError(f"Файл был создан другим процессом: {project_path}")
+            raise FileAlreadyExistsError(f"Файл был создан другим процессом: {project_path}")
         except OSError as e:
             raise FileManagerError(f"Не удалось создать файл проекта: {e}")
 
@@ -257,7 +248,7 @@ class FileManager:
         read_only_project_uri = f"{project_path.as_uri()}?mode=ro"
 
         if self.is_open:
-            if self._project_uri == project_path and self._open_mode == open_mode:
+            if self._project_path == project_path and self._open_mode == open_mode:
                 return
             else:
                 raise FileAlreadyOpenError("Перед открытием нового файла необходимо закрыть старый")
@@ -278,16 +269,21 @@ class FileManager:
                 if result is None or result[0] != "ok":
                     raise FileCorruptedError("Файл повреждён или имеет неверный формат")
 
+        except sqlite3.OperationalError:
+            raise FileLockedError("Файл заблокирован")
+
         except sqlite3.Error as e:
             raise FileCorruptedError("Файл повреждён или имеет неверный формат") from e
 
         # Считаем файл открытым (для чтения или записи)
+        self._project_path = project_path
         self._project_uri = f"{project_path.as_uri()}?mode=rw"
         self._read_only_project_uri = read_only_project_uri
         self._open_mode = open_mode
 
     def close_file(self):
         """Освобождает проект"""
+        self._project_path = None
         self._project_uri = None
         self._read_only_project_uri = None
         self._open_mode: OpenMode = OpenMode.READ_ONLY
@@ -302,6 +298,9 @@ class FileManager:
         """
         if not self.is_open:
             raise FileNotOpenError("Необходимо открыть проект")
+
+        if write_mode and self._open_mode==OpenMode.READ_ONLY:
+            raise ReadOnlyFileError("Файл открыт только для чтения")
 
         is_write_mode = (self._open_mode == OpenMode.READ_WRITE and write_mode)
 
@@ -320,7 +319,7 @@ class FileManager:
         """
         dist = Path(dist).resolve()
         if dist.exists():
-            raise WriteNotAllowedError(f"Файл по указанному пути существует: {dist}")
+            raise FileAlreadyExistsError(f"Файл по указанному пути существует: {dist}")
 
         # Гарантируем, что директория существует (актуально для Windows/Linux)
         dist.parent.mkdir(parents=True, exist_ok=True)
