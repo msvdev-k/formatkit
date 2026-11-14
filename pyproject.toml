@@ -1,0 +1,7 @@
+[project]
+name = "formatkit"
+version = "0.1.0"
+description = "Фреймворк для создания форматов файлов"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
