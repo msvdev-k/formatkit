@@ -7,31 +7,28 @@ from sqlite3 import Connection
 from types import TracebackType
 from typing import Callable, Protocol, runtime_checkable
 
-
-class FileError(Exception):
-    """Базовое исключение для всех ошибок работы с файлом проекта"""
-    pass
+from .exceptions import FileManagerError
 
 
-class LockHeldByOtherError(FileError):
+class LockHeldByOtherError(FileManagerError):
     """Файл заблокирован другим процессом"""
 
 
-class WriteNotAllowedError(FileError):
+class WriteNotAllowedError(FileManagerError):
     """Запись данных в файл невозможна"""
     pass
 
 
-class FileCorruptedError(FileError):
+class FileCorruptedError(FileManagerError):
     """Файл, повреждён или имеет не верный формат"""
     pass
 
 
-class FileAlreadyOpenError(FileError):
+class FileAlreadyOpenError(FileManagerError):
     """Файл уже открыт; одновременное ведение двух файлов не поддерживается"""
 
 
-class FileNotOpenError(FileError):
+class FileNotOpenError(FileManagerError):
     """Нет соединения с файлом"""
 
 
@@ -96,7 +93,7 @@ def make_backup_file(project_path: Path | str,
         except OSError:
             pass
 
-        raise FileError(f"Ошибка при создании резервной копии проекта: {e}")
+        raise FileManagerError(f"Ошибка при создании резервной копии проекта: {e}")
 
 
 class FileConnectionContext(AbstractContextManager[Connection]):
@@ -243,7 +240,7 @@ class FileManager:
         except FileExistsError:
             raise WriteNotAllowedError(f"Файл был создан другим процессом: {project_path}")
         except OSError as e:
-            raise FileError(f"Не удалось создать файл проекта: {e}")
+            raise FileManagerError(f"Не удалось создать файл проекта: {e}")
 
         # 4. Передаем управление в open_file. Он захватит lock и проинициализирует БД
         try:
@@ -354,7 +351,7 @@ class FileManager:
             success = True
 
         except (sqlite3.Error, OSError) as e:
-            raise FileError(f"Ошибка при создании копии проекта: {e}")
+            raise FileManagerError(f"Ошибка при создании копии проекта: {e}")
 
         finally:
             if not success:
