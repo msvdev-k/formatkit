@@ -7,8 +7,8 @@ from sqlite3 import Connection
 from types import TracebackType
 from typing import Callable, Protocol, runtime_checkable
 
-from .exceptions import FileManagerError, FileAlreadyOpenError, FileNotOpenError, FileCorruptedError, FileMissingError, \
-    FileLockedError, ReadOnlyFileError, FileAlreadyExistsError
+from .exceptions import (FileManagerError, FileAlreadyOpenError, FileNotOpenError, FileCorruptedError, FileMissingError,
+                         FileLockedError, ReadOnlyFileError, FileAlreadyExistsError)
 
 
 class OpenMode(Enum):
@@ -18,7 +18,7 @@ class OpenMode(Enum):
 
 
 def make_backup_file(project_path: Path | str,
-                     backup_dir: Path | str = None,
+                     backup_dir: Path | str | None = None,
                      progress: Callable[[int, int, int], None] | None = None) -> Path:
     """Создаёт резервную копию указанного файла проекта.
 
@@ -107,6 +107,8 @@ class FileConnectionContext(AbstractContextManager[Connection]):
             return self._conn
 
         except sqlite3.OperationalError:
+            self._rollback_safely()
+            self._close_safely()
             raise FileLockedError("Файл заблокирован")
 
         except Exception:
@@ -202,38 +204,38 @@ class FileManager:
         """Атомарно создаёт новый пустой файл проекта и открывает его на запись."""
         if not project_path:
             raise ValueError("project_path не может быть пустым")
-        project_path: Path = Path(project_path).resolve()
+        resolved_path: Path = Path(project_path).resolve()
 
         # 1. Проверяем, не открыто ли уже что-то
         if self.is_open:
             raise FileAlreadyOpenError("Перед созданием нового файла необходимо закрыть старый")
 
         # 2. Если файл уже существует, это ошибка перезаписи (защита данных пользователя)
-        if project_path.exists():
-            raise FileAlreadyExistsError(f"Файл уже существует: {project_path}")
+        if resolved_path.exists():
+            raise FileAlreadyExistsError(f"Файл уже существует: {resolved_path}")
 
         # 3. Гарантируем, что директория существует (актуально для Windows/Linux)
-        project_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             # Атомарное создание пустого файла с флагом эксклюзивности "x" (O_CREAT | O_EXCL)
             # Это защищает от состояния гонки, если другой процесс создал файл миллисекунду назад
-            with project_path.open(mode="x") as _:
+            with resolved_path.open(mode="x") as _:
                 pass  # Просто создаём пустой файл
         except FileExistsError:
-            raise FileAlreadyExistsError(f"Файл был создан другим процессом: {project_path}")
+            raise FileAlreadyExistsError(f"Файл был создан другим процессом: {resolved_path}")
         except OSError as e:
             raise FileManagerError(f"Не удалось создать файл проекта: {e}")
 
         # 4. Передаем управление в open_file. Он захватит lock и проинициализирует БД
         try:
-            self.open_file(project_path, open_mode=OpenMode.READ_WRITE)
+            self.open_file(resolved_path, open_mode=OpenMode.READ_WRITE)
         except Exception:
             # Если open_file упал (например, не удалось захватить lock сразу после создания),
             # удаляем пустой файл, чтобы не мусорить на диске
-            if project_path.is_file() and project_path.stat().st_size == 0:
+            if resolved_path.is_file() and resolved_path.stat().st_size == 0:
                 try:
-                    project_path.unlink()
+                    resolved_path.unlink()
                 except OSError:
                     pass
             raise
@@ -244,17 +246,17 @@ class FileManager:
         if not project_path:
             raise ValueError("project_path не может быть пустым")
 
-        project_path: Path = Path(project_path).resolve()
-        read_only_project_uri = f"{project_path.as_uri()}?mode=ro"
+        resolved_path: Path = Path(project_path).resolve()
+        read_only_project_uri = f"{resolved_path.as_uri()}?mode=ro"
 
         if self.is_open:
-            if self._project_path == project_path and self._open_mode == open_mode:
+            if self._project_path == resolved_path and self._open_mode == open_mode:
                 return
             else:
                 raise FileAlreadyOpenError("Перед открытием нового файла необходимо закрыть старый")
 
-        if not project_path.is_file():
-            raise FileNotFoundError(f"Файл не найден: {project_path}")
+        if not resolved_path.is_file():
+            raise FileMissingError(f"Файл не найден: {resolved_path}")
 
         # 2. Проверка целостности БД
         try:
@@ -276,8 +278,8 @@ class FileManager:
             raise FileCorruptedError("Файл повреждён или имеет неверный формат") from e
 
         # Считаем файл открытым (для чтения или записи)
-        self._project_path = project_path
-        self._project_uri = f"{project_path.as_uri()}?mode=rw"
+        self._project_path = resolved_path
+        self._project_uri = f"{resolved_path.as_uri()}?mode=rw"
         self._read_only_project_uri = read_only_project_uri
         self._open_mode = open_mode
 
@@ -299,7 +301,7 @@ class FileManager:
         if not self.is_open:
             raise FileNotOpenError("Необходимо открыть проект")
 
-        if write_mode and self._open_mode==OpenMode.READ_ONLY:
+        if write_mode and self._open_mode == OpenMode.READ_ONLY:
             raise ReadOnlyFileError("Файл открыт только для чтения")
 
         is_write_mode = (self._open_mode == OpenMode.READ_WRITE and write_mode)
@@ -317,6 +319,9 @@ class FileManager:
         Функция возврата принимает три параметра: статус последней итерации,
         оставшееся количество страниц для копирования и общее количество страниц
         """
+        if not self.is_open:
+            raise FileNotOpenError("Необходимо открыть проект")
+
         dist = Path(dist).resolve()
         if dist.exists():
             raise FileAlreadyExistsError(f"Файл по указанному пути существует: {dist}")
