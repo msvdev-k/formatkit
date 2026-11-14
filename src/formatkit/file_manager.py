@@ -7,7 +7,7 @@ from sqlite3 import Connection
 from types import TracebackType
 from typing import Callable, Protocol, runtime_checkable
 
-from .exceptions import FileManagerError
+from .exceptions import FileManagerError, FileAlreadyOpenError, FileNotOpenError
 
 
 class LockHeldByOtherError(FileManagerError):
@@ -22,14 +22,6 @@ class WriteNotAllowedError(FileManagerError):
 class FileCorruptedError(FileManagerError):
     """Файл, повреждён или имеет не верный формат"""
     pass
-
-
-class FileAlreadyOpenError(FileManagerError):
-    """Файл уже открыт; одновременное ведение двух файлов не поддерживается"""
-
-
-class FileNotOpenError(FileManagerError):
-    """Нет соединения с файлом"""
 
 
 class OpenMode(Enum):
