@@ -8,7 +8,6 @@ class FormatKitException(Exception):
 
 class FileManagerError(FormatKitException):
     """Базовое исключение для менеджера файлов"""
-    pass
 
 
 class FileNotOpenError(FileManagerError):
@@ -45,7 +44,6 @@ class FileCorruptedError(FileManagerError):
 
 class FormatManagerError(FormatKitException):
     """Базовое исключение для менеджера формата файлов"""
-    pass
 
 
 class InvalidFileSignatureError(FormatManagerError):
