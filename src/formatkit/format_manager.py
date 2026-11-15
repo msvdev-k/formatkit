@@ -1,18 +1,20 @@
 from abc import ABC, abstractmethod
 from typing import Callable, Type, Iterable, Generator
 
+from .file_manager import FileConnectionManager
+
 
 class PipelineContext:
     """Объект передаваемый по цепочке (контекст)"""
 
-    def __init__(self, connection):
-        self._connection = connection
+    def __init__(self, connection: FileConnectionManager) -> None:
+        self._fcm: FileConnectionManager = connection
         self._stop_flag: bool = False
 
     @property
-    def connection(self):
-        """Возвращает активное соединение с БД."""
-        return self._connection
+    def connection_manager(self) -> FileConnectionManager:
+        """Возвращает активный источник соединения с файлом проекта"""
+        return self._fcm
 
     def stop(self) -> None:
         """Остановить конвейер"""
@@ -71,7 +73,7 @@ class PipelineRegistry:
 
 
 def order(step_order: int,
-          file_format: Iterable[str] | str | None = None
+          schema: Iterable[str] | str | None = None
           ) -> Callable[[Type[FormatControlStep]], Type[FormatControlStep]]:
     """
     Декоратор для установки порядка звена в конвейере.
@@ -82,9 +84,31 @@ def order(step_order: int,
             raise TypeError(
                 f"Декоратор @order можно применять только к подклассам FormatControlStep. Ошибка в {cls.__name__}"
             )
-        PipelineRegistry.register_step(step_order, file_format, cls)
+        PipelineRegistry.register_step(step_order, schema, cls)
         return cls
 
     return decorator
 
 
+
+
+
+
+
+class FormatManager:
+    def __init__(self,
+                 application_id: int,
+                 schema_version: int,
+                 schema: str | None = None) -> None:
+        self._application_id: int = application_id
+        self._schema_version: int = schema_version
+        self._schema: str | None = schema
+
+
+
+
+    def check(self, fcm:FileConnectionManager):
+        """Проверить и обновить формат файла"""
+
+    def update(self):
+        """Обновить формат до актуального состояния"""
