@@ -60,3 +60,6 @@ class FormatCorruptedError(FormatManagerError):
 
 class MigrationError(FormatManagerError):
     """Ошибка при обновлении схемы данных файла со старой версии на новую"""
+
+class DataTypeError(FormatManagerError):
+    """Ошибка при работе с типами хранимых данных"""
