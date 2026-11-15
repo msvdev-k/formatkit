@@ -1,5 +1,7 @@
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum, IntEnum
+from types import MappingProxyType
 from typing import Self
 
 from .exceptions import DataTypeError
@@ -66,10 +68,21 @@ class Column:
 
 class ForeignKeyAction(StrEnum):
     """Действия при изменении или удалении родительской записи (ON UPDATE / ON DELETE)"""
+    # При изменении или удалении родительского ключа из базы данных никаких специальных действий
+    # не предпринимается (значение по умолчанию)
     NO_ACTION = "NO ACTION"
+    # Приложению запрещено удалять (ON DELETE) или изменять (ON UPDATE) родительский ключ,
+    # если к нему привязан один или несколько дочерних ключей
     RESTRICT = "RESTRICT"
+    # При удалении (ON DELETE) или изменении (ON UPDATE) родительского ключа столбцы
+    # дочернего ключа будут содержать значения NULL
     SET_NULL = "SET NULL"
+    # Аналогично "SET NULL", за исключением того, что столбцы дочернего ключа будут
+    # содержать значения по умолчанию
     SET_DEFAULT = "SET DEFAULT"
+    # Действие распространяет операцию удаления или обновления родительского ключа на каждый
+    # зависимый дочерний ключ. То есть, например, каждая строка в дочерней таблице, связанная
+    # с удаленной родительской строкой, также удаляется
     CASCADE = "CASCADE"
 
 
@@ -80,18 +93,108 @@ class ForeignKey:
     seq: int
     from_column: str
     to_table: str
-    # В SQLite 'to' может быть None, если в DDL указано просто REFERENCES parent_table
-    to_column: str | None
-    on_update: ForeignKeyAction = ForeignKeyAction.NO_ACTION
-    on_delete: ForeignKeyAction = ForeignKeyAction.NO_ACTION
+    # В SQLite 'to' может быть None, если указано просто REFERENCES parent_table
+    to_column: str | None = None
+    on_update: ForeignKeyAction = ForeignKeyAction.CASCADE
+    on_delete: ForeignKeyAction = ForeignKeyAction.RESTRICT
 
 
-@dataclass(frozen=True)
-class TableSchema:
+class IndexOrigin(StrEnum):
+    """Способ создания индекса согласно полю origin из PRAGMA index_list."""
+    # Индекс создан вручную явной командой CREATE INDEX
+    CREATE_INDEX = "c"
+    # Индекс создан автоматически из-за ограничения UNIQUE
+    UNIQUE_CONSTRAINT = "u"
+    # Индекс создан автоматически для первичного ключа PRIMARY KEY
+    PRIMARY_KEY = "pk"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class IndexColumn:
+    """Описание отдельного элемента (колонки или выражения) внутри индекса согласно PRAGMA index_info"""
+    # Ранг столбца в индексе. 0 означает крайний левый столбец.
+    seq_no: int
+    # Ранг столбца в таблице. Значение -1 означает rowid, а значение -2 означает использование выражения
+    c_id: int
+    # Имя индексируемого столбца. Равно NULL, если столбец является идентификатором строки (rowid) или выражением
+    name: str | None
+
+    @property
+    def is_expression(self) -> bool:
+        """Возвращает True, если элемент индекса является выражением"""
+        return self.c_id == -2
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Index:
+    """Описание индекса таблицы согласно PRAGMA index_list и PRAGMA index_info"""
+    # Название индекса
     name: str
-    sql: str
-    columns: list[ColumnSchema] = field(default_factory=list)
-    foreign_keys: list[ForeignKeySchema] = field(default_factory=list)
+    # Флаг уникального значения
+    is_unique: bool
+    # Способ создания индекса
+    origin: IndexOrigin
+    # Частичный (True) или полный (False) индекс
+    is_partial: bool = False
+    # Столбцы индекса
+    columns: tuple[IndexColumn, ...] = ()
+
+
+class TableType(StrEnum):
+    """Типы табличных объектов согласно полю type из PRAGMA table_list"""
+    TABLE = "table"
+    VIEW = "view"
+    SHADOW = "shadow"
+    VIRTUAL = "virtual"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Table:
+    """Описание таблицы базы данных SQLite"""
+    # Схема, в которой отображается таблица или представление (например, "main" или "temp")
+    schema: str = "main"
+    # Имя таблицы или представления
+    name: str
+    # Тип объекта
+    table_type: TableType = TableType.TABLE
+    # Количество столбцов в таблице, включая сгенерированные и скрытые столбцы
+    n_cols: int = 0
+    # True (1), если таблица создана как WITHOUT ROWID. False (0) - обычная таблица с rowid
+    is_without_rowid: bool = False
+    # True (1) - к таблице применяются строгие правила типизации. False (0) - гибкие правила типизации
+    is_strict: bool = False
+
+    # Неизменяемый словарь колонок (имя колонки -> объект Column)
+    columns: Mapping[str, Column] = field(default_factory=lambda: MappingProxyType({}))
+    # Внешние ключи
+    foreign_keys: tuple[ForeignKey, ...] = ()
+    # Индексы
+    indexes: tuple[Index, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Гарантирует, что переданный словарь колонок обернут в неизменяемый MappingProxyType"""
+        if not isinstance(self.columns, MappingProxyType):
+            # При frozen=True изменение атрибутов в __post_init__ выполняется через object.__setattr__
+            object.__setattr__(self, "columns", MappingProxyType(dict(self.columns)))
+
+        if self.n_cols == 0:
+            object.__setattr__(self, "n_cols", len(self.columns))
+
+    @property
+    def primary_key_columns(self) -> tuple[Column, ...]:
+        """Возвращает кортеж колонок первичного ключа, отсортированный по их порядку в ключе"""
+        pk_cols = (col for col in self.columns.values() if col.is_primary_key)
+        return tuple(sorted(pk_cols, key=lambda col: col.primary_key))
+
+    @property
+    def has_primary_key(self) -> bool:
+        """Возвращает True, если в таблице явно объявлен PRIMARY KEY"""
+        return any(col.is_primary_key for col in self.columns.values())
+
+    @property
+    def is_without_rowid_valid(self) -> bool:
+        """Проверяет архитектурное правило SQLite: WITHOUT ROWID требует явного PRIMARY KEY"""
+        return not self.is_without_rowid or self.has_primary_key
 
 
 def get_database_schema(db_path: str | Path) -> dict[str, TableSchema]:
