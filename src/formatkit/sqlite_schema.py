@@ -1,6 +1,7 @@
-from collections.abc import Mapping
+from contextlib import closing
 from dataclasses import dataclass, field
 from enum import StrEnum, IntEnum
+from sqlite3 import Connection, Row
 from types import MappingProxyType
 from typing import Self
 
@@ -165,20 +166,11 @@ class Table:
     is_strict: bool = False
 
     # Неизменяемый словарь колонок (имя колонки -> объект Column)
-    columns: Mapping[str, Column] = field(default_factory=lambda: MappingProxyType({}))
+    columns: MappingProxyType[str, Column] = field(default_factory=lambda: MappingProxyType({}))
     # Внешние ключи
     foreign_keys: tuple[ForeignKey, ...] = ()
     # Индексы
     indexes: tuple[Index, ...] = ()
-
-    def __post_init__(self) -> None:
-        """Гарантирует, что переданный словарь колонок обернут в неизменяемый MappingProxyType"""
-        if not isinstance(self.columns, MappingProxyType):
-            # При frozen=True изменение атрибутов в __post_init__ выполняется через object.__setattr__
-            object.__setattr__(self, "columns", MappingProxyType(dict(self.columns)))
-
-        if self.n_cols == 0:
-            object.__setattr__(self, "n_cols", len(self.columns))
 
     @property
     def primary_key_columns(self) -> tuple[Column, ...]:
@@ -197,65 +189,117 @@ class Table:
         return not self.is_without_rowid or self.has_primary_key
 
 
-def get_database_schema(db_path: str | Path) -> dict[str, TableSchema]:
-    """Читает схему таблиц SQLite и возвращает словарь объектов TableSchema."""
-    schema: dict[str, TableSchema] = {}
+def get_database_schema(conn: Connection, schema: str = "main", include_system: bool = False, ) -> dict[str, Table]:
+    """Читает схему базы данных SQLite через PRAGMA и возвращает словарь объектов Table.
 
-    # Используем менеджер контекста для автоматического закрытия соединения
-    with sqlite3.connect(db_path) as conn:
-        # Включаем доступ к столбцам по имени
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    Args:
+        conn: Активное соединение sqlite3.Connection.
+        schema: Имя схемы (по умолчанию "main").
+        include_system: Включать ли системные таблицы (sqlite_*).
+    """
+    with closing(conn.cursor()) as cursor:
+        cursor.row_factory = lambda cur, row: Row(cur, row)
+        tables: dict[str, Table] = {}
 
-        # Получаем список пользовательских таблиц
-        cursor.execute(
-            """
-            SELECT name, sql 
-            FROM sqlite_schema 
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%';
-            """
-        )
-        tables = cursor.fetchall()
+        # 1. Фильтруем системные таблицы и схему прямо в SQL
+        query_tables = """
+            SELECT schema, name, type, ncol, wr, strict
+            FROM pragma_table_list
+            WHERE schema = ? AND (? OR name NOT LIKE 'sqlite_%');
+        """
+        cursor.execute(query_tables, (schema, include_system))
+        table_rows = cursor.fetchall()
 
-        for table_row in tables:
-            table_name = table_row["name"]
-            table_sql = table_row["sql"]
+        for t_row in table_rows:
+            t_name: str = t_row["name"]
 
-            # Имя таблицы в PRAGMA нельзя передать через стандартный плейсхолдер '?',
-            # поэтому экранируем двойные кавычки для защиты от SQL-инъекций.
-            safe_table_name = table_name.replace('"', '""')
-
-            # 1. Читаем информацию о колонках
-            cursor.execute(f'PRAGMA table_info("{safe_table_name}");')
-            columns = [
-                ColumnSchema(
-                    name=col["name"],
-                    data_type=col["type"],
-                    not_null=bool(col["notnull"]),
-                    default_value=col["dflt_value"],
-                    is_primary_key=bool(col["pk"]),
+            # 2. Колонки (запрос компилируется один раз и берется из кеша)
+            cursor.execute(
+                "SELECT name, type, [notnull], dflt_value, pk, hidden FROM pragma_table_xinfo(?, ?);",
+                (t_name, schema),
+            )
+            columns = {
+                c_row["name"]: Column(
+                    name=c_row["name"],
+                    data_type=DataClass.type_affinity(c_row["type"]),
+                    not_null=bool(c_row["notnull"]),
+                    default_value=c_row["dflt_value"],
+                    primary_key=c_row["pk"],
+                    hidden=ColumnType(c_row["hidden"]),
                 )
-                for col in cursor.fetchall()
-            ]
+                for c_row in cursor.fetchall()
+            }
 
-            # 2. Читаем информацию о внешних ключах
-            cursor.execute(f'PRAGMA foreign_key_list("{safe_table_name}");')
-            foreign_keys = [
-                ForeignKeySchema(
-                    from_column=fk["from"],
-                    to_table=fk["table"],
-                    to_column=fk["to"],
-                    on_update=fk["on_update"],
-                    on_delete=fk["on_delete"],
+            # 3. Внешние ключи (сразу сортируем в БД)
+            cursor.execute(
+                """
+                SELECT id, seq, [from], [table], [to], on_update, on_delete
+                FROM pragma_foreign_key_list(?, ?)
+                ORDER BY id, seq;
+                """,
+                (t_name, schema),
+            )
+            foreign_keys = tuple(
+                ForeignKey(
+                    id=fk_row["id"],
+                    seq=fk_row["seq"],
+                    from_column=fk_row["from"],
+                    to_table=fk_row["table"],
+                    to_column=fk_row["to"],
+                    on_update=ForeignKeyAction(fk_row["on_update"].upper()),
+                    on_delete=ForeignKeyAction(fk_row["on_delete"].upper()),
                 )
-                for fk in cursor.fetchall()
-            ]
-
-            schema[table_name] = TableSchema(
-                name=table_name,
-                sql=table_sql,
-                columns=columns,
-                foreign_keys=foreign_keys,
+                for fk_row in cursor.fetchall()
             )
 
-    return schema
+            # 4. Индексы и их колонки
+            cursor.execute(
+                "SELECT name, [unique], origin, partial FROM pragma_index_list(?, ?);",
+                (t_name, schema),
+            )
+            indexes_list: list[Index] = []
+
+            for idx_row in cursor.fetchall():
+                idx_name: str = idx_row["name"]
+
+                cursor.execute(
+                    """
+                    SELECT seqno, cid, name
+                    FROM pragma_index_info(?, ?)
+                    ORDER BY seqno;
+                    """,
+                    (idx_name, schema),
+                )
+                idx_columns = tuple(
+                    IndexColumn(
+                        seq_no=ic_row["seqno"],
+                        c_id=ic_row["cid"],
+                        name=ic_row["name"],
+                    )
+                    for ic_row in cursor.fetchall()
+                )
+
+                indexes_list.append(
+                    Index(
+                        name=idx_name,
+                        is_unique=bool(idx_row["unique"]),
+                        origin=IndexOrigin(idx_row["origin"]),
+                        is_partial=bool(idx_row["partial"]),
+                        columns=idx_columns,
+                    )
+                )
+
+            # 5. Собираем объект Table
+            tables[t_name] = Table(
+                schema=t_row["schema"],
+                name=t_name,
+                table_type=TableType(t_row["type"]),
+                n_cols=t_row["ncol"],
+                is_without_rowid=bool(t_row["wr"]),
+                is_strict=bool(t_row["strict"]),
+                columns=MappingProxyType(columns),
+                foreign_keys=foreign_keys,
+                indexes=tuple(indexes_list),
+            )
+
+        return tables
