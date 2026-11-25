@@ -202,10 +202,10 @@ def get_database_schema(conn: Connection, schema: str = "main", include_system: 
         tables: dict[str, Table] = {}
 
         # 1. Фильтруем системные таблицы и схему прямо в SQL
-        query_tables = """
+        query_tables = r"""
             SELECT schema, name, type, ncol, wr, strict
             FROM pragma_table_list
-            WHERE schema = ? AND (? OR name NOT LIKE 'sqlite_%');
+            WHERE schema = ? AND (? OR name NOT LIKE 'sqlite\_%' ESCAPE '\');
         """
         cursor.execute(query_tables, (schema, include_system))
         table_rows = cursor.fetchall()
